@@ -2,8 +2,6 @@
 
 A first-pass dark Textual app for browsing recent Godot archive versions, downloading platform-appropriate editors, and scanning installed editors/projects.
 
-<img width="1492" height="732" alt="image" src="https://github.com/user-attachments/assets/029c17b4-abd5-4076-8687-de9b32930dd2" />
-
 Default folders on Windows:
 
 - Engines: `H:\godot`
@@ -27,6 +25,73 @@ python -m venv .venv
 ```
 
 If `python` is not on PATH, install Python 3.11+ from python.org or the Microsoft Store, then rerun the commands.
+
+
+## Make `godot` available from any terminal
+
+You can make the `godot` command launch Godot Terminal Manager from anywhere.
+
+### Windows PowerShell
+
+Open your PowerShell profile:
+
+```powershell
+notepad $PROFILE
+```
+
+Add this function, replacing the path with the location of `godot_terminal_manager.py`:
+
+```powershell
+function godot {
+    python "C:\\path\\to\\godot_terminal_manager.py" @args
+}
+```
+
+Reload your profile:
+
+```powershell
+. $PROFILE
+```
+
+Now you can run:
+
+```powershell
+godot
+```
+
+Any extra arguments are passed through to the Python script.
+
+### macOS zsh
+
+Open your zsh config:
+
+```zsh
+nano ~/.zshrc
+```
+
+Add this function, replacing the path with the location of `godot_terminal_manager.py`:
+
+```zsh
+godot() {
+    python3 "/path/to/godot_terminal_manager.py" "$@"
+}
+```
+
+Reload your shell config:
+
+```zsh
+source ~/.zshrc
+```
+
+Now you can run:
+
+```zsh
+godot
+```
+
+Any extra arguments are passed through to the Python script.
+
+> The app can also write a `godot` launcher into the configured engine directory with `p` from Settings. If that engine directory is on your PATH, that launcher provides the same global `godot` command.
 
 ## Controls
 
