@@ -38,6 +38,7 @@ class GodotVersion:
     windows_url: str = ""
     dotnet_url: str = ""
     mac_url: str = ""
+    mac_dotnet_url: str = ""
 
 
 class LinkParser(HTMLParser):
@@ -128,6 +129,8 @@ def enrich_download_links(version: GodotVersion) -> None:
             version.dotnet_url = href
         if is_mac_editor and not is_dotnet and not version.mac_url:
             version.mac_url = href
+        if is_mac_editor and is_dotnet and not version.mac_dotnet_url:
+            version.mac_dotnet_url = href
 
 
 def fallback_versions() -> list[GodotVersion]:
@@ -146,7 +149,6 @@ def load_config() -> dict[str, str]:
         defaults = {
             "engine_dir": str(Path.home() / "godot"),
             "project_dir": str(Path.home() / "projects" / "godot"),
-            "plugins_dir": str(Path.home() / "godot" / "plugins"),
             "plugin_repos": [],
             "active_editor": "",
         }
@@ -154,7 +156,6 @@ def load_config() -> dict[str, str]:
         defaults = {
             "engine_dir": r"H:\godot",
             "project_dir": r"H:\projects\godot",
-            "plugins_dir": r"H:\godot\plugins",
             "plugin_repos": [],
             "active_editor": "",
         }
@@ -166,6 +167,12 @@ def load_config() -> dict[str, str]:
     config = defaults | {key: saved[key] for key in defaults.keys() & saved.keys()}
     if isinstance(config.get("plugin_repos"), str):
         config["plugin_repos"] = [repo.strip() for repo in config["plugin_repos"].splitlines() if repo.strip()]
+
+    if sys.platform == "darwin":
+        if re.match(r"^[A-Za-z]:[\\/]", str(config.get("engine_dir", ""))):
+            config["engine_dir"] = defaults["engine_dir"]
+        if re.match(r"^[A-Za-z]:[\\/]", str(config.get("project_dir", ""))):
+            config["project_dir"] = defaults["project_dir"]
     old_engine_dir = str(Path.home() / "Godot" / "Engines")
     old_project_dir = str(Path.home() / "Godot" / "Projects")
     if config["engine_dir"] == old_engine_dir and sys.platform != "darwin":
@@ -263,22 +270,77 @@ def clone_plugin_repo(repo: str, project_folder: str) -> Path:
     return target
 
 
+def find_editor_app(editor_folder: Path) -> Path | None:
+    if sys.platform != "darwin":
+        return None
+
+    for app in sorted(editor_folder.rglob("*.app")):
+        if "godot" in app.name.lower() and (app / "Contents" / "MacOS").is_dir():
+            return app
+    return None
+
+
+def repair_macos_app_permissions(editor_folder: Path) -> None:
+    """Restore executable bits that zipfile extraction may drop from macOS app bundles."""
+    if sys.platform != "darwin":
+        return
+
+    for app in editor_folder.rglob("*.app"):
+        macos_dir = app / "Contents" / "MacOS"
+        if not macos_dir.is_dir():
+            continue
+
+        for candidate in macos_dir.iterdir():
+            if not candidate.is_file():
+                continue
+            mode = candidate.stat().st_mode
+            candidate.chmod(mode | 0o111)
+
+
 def find_editor_launcher(editor_folder: Path) -> Path | None:
     if sys.platform == "darwin":
-        apps = [path for path in sorted(editor_folder.rglob("*.app")) if "godot" in path.name.lower()]
-        return apps[0] if apps else None
-    exes = [path for path in sorted(editor_folder.rglob("*.exe")) if "godot" in path.name.lower()]
-    return exes[0] if exes else None
+        app = find_editor_app(editor_folder)
+        if app is None:
+            return None
+
+        macos_dir = app / "Contents" / "MacOS"
+        preferred = macos_dir / "Godot"
+        if preferred.is_file():
+            return preferred
+
+        for candidate in sorted(macos_dir.iterdir()):
+            if candidate.is_file() and "godot" in candidate.name.lower():
+                return candidate
+        return None
+
+    if sys.platform.startswith("win"):
+        exes = [path for path in sorted(editor_folder.rglob("*.exe")) if "godot" in path.name.lower()]
+        return exes[0] if exes else None
+
+    for candidate in sorted(editor_folder.rglob("Godot*")):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def download_and_extract_editor(version: GodotVersion, engine_dir: str, flavor: str) -> Path:
-    url = {"windows": version.windows_url, "dotnet": version.dotnet_url, "mac": version.mac_url}[flavor]
+    url = {
+        "windows": version.windows_url,
+        "dotnet": version.dotnet_url,
+        "mac": version.mac_url,
+        "mac_dotnet": version.mac_dotnet_url,
+    }[flavor]
     if not url:
         raise ValueError(f"No {flavor} download link found for that archive entry.")
 
     engine_root = Path(os.path.expandvars(os.path.expanduser(engine_dir)))
     engine_root.mkdir(parents=True, exist_ok=True)
-    suffix = {"windows": "", "dotnet": "-dotnet", "mac": "-mac"}[flavor]
+    suffix = {
+        "windows": "",
+        "dotnet": "-dotnet",
+        "mac": "-mac",
+        "mac_dotnet": "-dotnet-mac",
+    }[flavor]
     target = engine_root / f"{version.name}{suffix}"
     if target.exists():
         raise FileExistsError(f"{target.name} already exists.")
@@ -295,6 +357,7 @@ def download_and_extract_editor(version: GodotVersion, engine_dir: str, flavor: 
         with zipfile.ZipFile(zip_path) as archive:
             archive.extractall(target)
         flatten_single_child_folder(target)
+        repair_macos_app_permissions(target)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
         raise
@@ -310,6 +373,10 @@ def flatten_single_child_folder(folder: Path) -> None:
         return
 
     nested = children[0]
+
+    if nested.suffix.lower() == ".app":
+        return
+
     temp_name = folder.parent / f".{folder.name}-flattening"
     if temp_name.exists():
         shutil.rmtree(temp_name, ignore_errors=True)
@@ -343,11 +410,17 @@ def move_to_trash(path: Path) -> None:
         return
 
     if sys.platform == "darwin":
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Finder" to delete POSIX file (system attribute "TRASH_PATH")'],
-            check=True,
-            env={**os.environ, "TRASH_PATH": str(path)},
-        )
+        trash_dir = Path.home() / ".Trash"
+        trash_dir.mkdir(parents=True, exist_ok=True)
+
+        target = trash_dir / path.name
+        counter = 1
+
+        while target.exists():
+            target = trash_dir / f"{path.stem} {counter}{path.suffix}"
+            counter += 1
+
+        shutil.move(str(path), str(target))
         return
 
     trash_dir = Path.home() / ".local" / "share" / "Trash" / "files"
@@ -396,16 +469,54 @@ def recycle_with_windows_shell(path: Path) -> None:
 
 
 def launch_editor(editor_folder: str) -> None:
-    launcher = find_editor_launcher(Path(editor_folder))
+    folder = Path(os.path.expandvars(os.path.expanduser(editor_folder)))
+
+    if sys.platform == "darwin":
+        app = find_editor_app(folder)
+        if app is None:
+            raise FileNotFoundError("No Godot .app bundle found in editor folder.")
+
+        # Repair old downloads too, not just newly extracted ones.
+        repair_macos_app_permissions(folder)
+
+        launcher = find_editor_launcher(folder)
+        if launcher is None:
+            raise FileNotFoundError("Godot.app exists, but its Contents/MacOS executable was not found.")
+        if not os.access(launcher, os.X_OK):
+            raise PermissionError(f"Godot executable is not executable: {launcher}")
+
+        result = subprocess.run(
+            ["open", "-n", str(app)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "macOS failed to launch the application.").strip()
+            raise RuntimeError(message)
+        return
+
+    launcher = find_editor_launcher(folder)
     if launcher is None:
         raise FileNotFoundError("No Godot launcher found in editor folder.")
-    if sys.platform == "darwin":
-        subprocess.Popen(["open", str(launcher)])
-    else:
-        subprocess.Popen([str(launcher)])
+
+    subprocess.Popen(
+        [str(launcher)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
 
 
 def write_godot_shim(engine_dir: str, launcher: Path) -> Path:
+    if sys.platform == "darwin":
+        # launcher is inside Godot.app/Contents/MacOS. Repair the app bundle before
+        # writing a shell shim that executes it directly.
+        for parent in launcher.parents:
+            if parent.suffix.lower() == ".app":
+                repair_macos_app_permissions(parent.parent)
+                break
+
     engine_root = Path(os.path.expandvars(os.path.expanduser(engine_dir)))
     engine_root.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
@@ -444,10 +555,12 @@ def launch_project(project_folder: str, engine_dir: str, active_editor: str = ""
         args = ["--path", project_folder]
         if editor_mode:
             args.insert(0, "--editor")
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", str(launcher), "--args", *args])
-        else:
-            subprocess.Popen([str(launcher), *args])
+        subprocess.Popen(
+            [str(launcher), *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
         return
 
     editor_root = Path(os.path.expandvars(os.path.expanduser(engine_dir)))
@@ -464,28 +577,50 @@ def launch_project(project_folder: str, engine_dir: str, active_editor: str = ""
     args = ["--path", project_folder]
     if editor_mode:
         args.insert(0, "--editor")
-    if sys.platform == "darwin":
-        subprocess.Popen(["open", str(launcher), "--args", *args])
-    else:
-        subprocess.Popen([str(launcher), *args])
+    subprocess.Popen(
+        [str(launcher), *args],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
 
 
 def open_folder(path: str) -> None:
+    resolved = str(Path(os.path.expandvars(os.path.expanduser(path))).resolve())
+
     if sys.platform.startswith("win"):
-        os.startfile(path)  # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", path])
-    else:
-        subprocess.Popen(["xdg-open", path])
+        os.startfile(resolved)  # type: ignore[attr-defined]
+        return
+
+    command = ["open", "-a", "Finder", resolved] if sys.platform == "darwin" else ["xdg-open", resolved]
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or f"Failed to open folder: {resolved}").strip()
+        raise RuntimeError(message)
 
 
 def open_file(path: Path) -> None:
+    resolved = str(path.resolve())
+
     if sys.platform.startswith("win"):
-        os.startfile(str(path))  # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
-    else:
-        subprocess.Popen(["xdg-open", str(path)])
+        os.startfile(resolved)  # type: ignore[attr-defined]
+        return
+
+    command = ["open", resolved] if sys.platform == "darwin" else ["xdg-open", resolved]
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or f"Failed to open file: {resolved}").strip()
+        raise RuntimeError(message)
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -524,14 +659,11 @@ class SettingsPanel(Vertical):
         yield Input(value=self.config["engine_dir"], id="engine_dir")
         yield Label("Project dir")
         yield Input(value=self.config["project_dir"], id="project_dir")
-        yield Label("Plugins dir")
-        yield Input(value=self.config["plugins_dir"], id="plugins_dir")
 
     def current_config(self) -> dict[str, str]:
         return {
             "engine_dir": self.query_one("#engine_dir", Input).value,
             "project_dir": self.query_one("#project_dir", Input).value,
-            "plugins_dir": self.query_one("#plugins_dir", Input).value,
         }
 
 
@@ -543,7 +675,7 @@ class SettingsModal(ModalScreen[dict[str, str] | None]):
 
     #settings-dialog {
         width: 76;
-        height: 26;
+        height: 22;
         padding: 1 2;
         background: #111827;
         border: thick #8bd3ff;
@@ -903,6 +1035,7 @@ class GodotManagerApp(App):
         Binding("f", "open_folder", "Folder", show=False),
         Binding("g", "open_settings", "Settings", show=False),
         Binding("delete", "delete_selected", "Delete", show=False),
+        Binding("backspace", "delete_selected", "Delete", show=False),
         Binding("q", "quit", "Quit", show=False),
     ]
 
@@ -1047,10 +1180,30 @@ class GodotManagerApp(App):
         self.screen.focus_previous()
         self.set_timer(0.05, self.set_context_status)
 
+    @on(DataTable.CellSelected, "#editors")
+    def editor_cell_selected(self) -> None:
+        self.action_open_selected()
+
+    @on(DataTable.RowSelected, "#editors")
+    def editor_row_selected(self) -> None:
+        self.action_open_selected()
+
+    @on(DataTable.CellSelected, "#projects")
+    def project_cell_selected(self) -> None:
+        self.action_open_selected()
+
+    @on(DataTable.RowSelected, "#projects")
+    def project_row_selected_main(self) -> None:
+        self.action_open_selected()
+
     def action_open_selected(self) -> None:
         section = self.active_section()
         if section == "log":
-            open_file(LOG_PATH)
+            try:
+                open_file(LOG_PATH)
+            except Exception as error:
+                self.add_log(f"Open log file failed: {error}")
+                return
             self.add_log(f"Opened {LOG_PATH.name}.")
             return
         if section == "editors":
@@ -1152,7 +1305,11 @@ class GodotManagerApp(App):
                 if editor is None:
                     self.add_log("Select an installed editor first.")
                     return
-                open_folder(editor[3])
+                try:
+                    open_folder(editor[3])
+                except Exception as error:
+                    self.add_log(f"Open editor folder failed: {error}")
+                    return
                 self.add_log(f"Opened folder for {editor[0]}.")
             else:
                 self.set_context_status()
@@ -1161,7 +1318,11 @@ class GodotManagerApp(App):
         if project is None:
             self.add_log("Select a project first.")
             return
-        open_folder(project[3])
+        try:
+            open_folder(project[3])
+        except Exception as error:
+            self.add_log(f"Open project folder failed: {error}")
+            return
         self.add_log(f"Opened folder for {project[0]}.")
 
     def action_active_or_add_plugin(self) -> None:
@@ -1242,17 +1403,20 @@ class GodotManagerApp(App):
         if self.active_section() != "archive":
             self.set_context_status()
             return
-        if sys.platform == "darwin":
-            self.set_context_status()
-            return
-        self.download_selected("dotnet")
+        flavor = "mac_dotnet" if sys.platform == "darwin" else "dotnet"
+        self.download_selected(flavor)
 
     def download_selected(self, flavor: str) -> None:
         version = self.selected_version()
         if version is None:
             self.add_log("Select an archive version first.")
             return
-        label = {"windows": "Windows", "dotnet": ".NET", "mac": "macOS"}[flavor]
+        label = {
+            "windows": "Windows",
+            "dotnet": "Windows .NET",
+            "mac": "macOS",
+            "mac_dotnet": "macOS .NET",
+        }[flavor]
         self.add_log(f"Downloading {version.name} {label}...")
         self.run_worker(lambda: self.download_worker(version, flavor), thread=True)
 
@@ -1392,16 +1556,13 @@ class GodotManagerApp(App):
     def set_context_status(self) -> None:
         section = self.active_section()
         if section == "archive":
-            if sys.platform == "darwin":
-                keys = "Archive keys: r refresh | s download macOS | g settings"
-            else:
-                keys = "Archive keys: r refresh | s download standard | n download .NET | g settings"
+            keys = "Archive keys: r refresh | s download standard | n download .NET | g settings"
         elif section == "editors":
-            keys = "Installed editor keys: r refresh | o open editor | a set active | f open folder | delete confirm trash | g settings"
+            keys = "Installed editor keys: r refresh | o open editor | a set active | f open folder | delete/backspace confirm trash | g settings"
         elif section == "projects":
-            keys = "Project keys: r refresh | o open in editor | l launch project | f open folder | delete confirm trash | g settings"
+            keys = "Project keys: r refresh | o open in editor | l launch project | f open folder | delete/backspace confirm trash | g settings"
         elif section == "plugins":
-            keys = "Plugin keys: r refresh | a add repo | c clone into project | delete remove repo | g settings"
+            keys = "Plugin keys: r refresh | a add repo | c clone into project | delete/backspace remove repo | g settings"
         elif section == "log":
             keys = "Log keys: c copy last | o open log file | g settings"
         else:

@@ -1,11 +1,8 @@
-```zsh
 #!/bin/zsh
-
-clear
 
 echo
 echo "========================================"
-echo "  Godot Terminal Manager Alias Setup"
+echo " Godot Terminal Manager Alias Setup"
 echo "========================================"
 echo
 
@@ -13,102 +10,97 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANAGER="$SCRIPT_DIR/godot_terminal_manager.py"
 ZSHRC="$HOME/.zshrc"
 
-echo "Setup script:"
-echo "  $0"
+echo "Script directory:"
+echo "  $SCRIPT_DIR"
 echo
-echo "Manager:"
+
+echo "Manager path:"
 echo "  $MANAGER"
 echo
-echo "zsh profile:"
+
+echo "zsh config:"
 echo "  $ZSHRC"
 echo
 
 if [[ ! -f "$MANAGER" ]]; then
-    echo "ERROR:"
-    echo "godot_terminal_manager.py was not found next to this setup script."
+    echo "ERROR: godot_terminal_manager.py was not found."
+    echo "It must be in the same folder as this setup script."
     echo
-    read -k 1 "?Press any key to close..."
-    echo
+    read "?Press Enter to close..."
     exit 1
 fi
 
 touch "$ZSHRC"
 
-python3 - "$ZSHRC" "$MANAGER" <<'PY'
+START_MARKER="# >>> Godot Terminal Manager >>>"
+END_MARKER="# <<< Godot Terminal Manager <<<"
+
+NEW_BLOCK="$START_MARKER
+godot() {
+    python3 \"$MANAGER\" \"\$@\"
+}
+$END_MARKER"
+
+echo "Checking existing godot function..."
+echo
+
+if grep -qF "$START_MARKER" "$ZSHRC"; then
+    echo "Existing managed godot entry found."
+    echo "Updating it..."
+
+    python3 - "$ZSHRC" "$START_MARKER" "$END_MARKER" "$NEW_BLOCK" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-zshrc = Path(sys.argv[1]).expanduser()
-manager = sys.argv[2]
+path = Path(sys.argv[1])
+start = sys.argv[2]
+end = sys.argv[3]
+new_block = sys.argv[4]
 
-content = zshrc.read_text(encoding="utf-8") if zshrc.exists() else ""
+content = path.read_text(encoding="utf-8")
 
-desired = f'''godot() {{
-    python3 "{manager}" "$@"
-}}'''
+pattern = re.escape(start) + r".*?" + re.escape(end)
 
-pattern = r'(?ms)^godot\(\)\s*\{.*?^\}'
+content = re.sub(
+    pattern,
+    lambda _: new_block,
+    content,
+    count=1,
+    flags=re.S,
+)
 
-match = re.search(pattern, content)
-
-if match:
-    print("Existing godot function found:")
-    print()
-    print(match.group(0))
-    print()
-
-    if match.group(0) == desired:
-        print("OK: godot already points to the correct location.")
-    else:
-        print("Path/function does not match. Updating...")
-        content = re.sub(pattern, lambda _: desired, content, count=1)
-        zshrc.write_text(content, encoding="utf-8")
-
-        print()
-        print("Updated godot function:")
-        print()
-        print(desired)
-else:
-    print("No godot function found. Adding it...")
-
-    if content and not content.endswith("\n"):
-        content += "\n"
-
-    content += "\n" + desired + "\n"
-
-    zshrc.write_text(content, encoding="utf-8")
-
-    print()
-    print("Added godot function:")
-    print()
-    print(desired)
-
-print()
-print(f"godot -> {manager}")
+path.write_text(content, encoding="utf-8")
 PY
 
-RESULT=$?
-
-echo
-
-if [[ $RESULT -ne 0 ]]; then
-    echo "ERROR: Setup failed."
 else
-    echo "========================================"
-    echo "Setup complete."
-    echo "========================================"
-    echo
-    echo "Open a NEW Terminal window and type:"
-    echo
-    echo "  godot"
-    echo
-    echo "Or reload the current shell with:"
-    echo
-    echo "  source ~/.zshrc"
+    echo "No managed godot entry found."
+    echo "Adding it..."
+
+    {
+        echo
+        echo "$NEW_BLOCK"
+        echo
+    } >> "$ZSHRC"
 fi
 
 echo
-read -k 1 "?Press any key to close..."
+echo "Result:"
 echo
-```
+echo "$NEW_BLOCK"
+echo
+
+echo "========================================"
+echo " Setup complete"
+echo "========================================"
+echo
+echo "Open a new Terminal window and run:"
+echo
+echo "  godot"
+echo
+echo "Or activate it right now with:"
+echo
+echo "  source ~/.zshrc"
+echo
+
+read "?Press Enter to close..."
