@@ -19,7 +19,6 @@ Press `g` from any section to open settings.
 ## Run
 
 ```powershell
-cd C:\Users\Marshall\Documents\Codex\2026-09-06\what\work\godot_tui
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 .\.venv\Scripts\python godot_terminal_manager.py
