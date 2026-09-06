@@ -1,5 +1,7 @@
 # Godot Terminal Manager
 
+<img width="1492" height="732" alt="Screenshot 2026-09-06 155605" src="https://github.com/user-attachments/assets/565d8534-99cc-4606-a59f-6dfc8a50b74d" />
+
 A first-pass dark Textual app for browsing recent Godot archive versions, downloading platform-appropriate editors, and scanning installed editors/projects.
 
 Default folders on Windows:
