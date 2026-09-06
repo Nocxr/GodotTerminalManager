@@ -2,6 +2,8 @@
 
 A first-pass dark Textual app for browsing recent Godot archive versions, downloading platform-appropriate editors, and scanning installed editors/projects.
 
+<img width="1492" height="732" alt="image" src="https://github.com/user-attachments/assets/029c17b4-abd5-4076-8687-de9b32930dd2" />
+
 Default folders on Windows:
 
 - Engines: `H:\godot`
